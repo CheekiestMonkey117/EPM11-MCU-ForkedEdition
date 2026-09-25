@@ -76,104 +76,11 @@ uint32_t bus_get_delay(void) {
 }
 
 /* ========================================================================= */
-/*  Beats                                                                    */
-/* ========================================================================= */
-
-// BUS_CRC16: CRC-16/CCITT over one 16-bit word, the same as cpu_bus.sv.
-static uint16_t bus_crc16(uint16_t crc, uint16_t word) {
-    uint32_t i;
-
-    crc ^= word;
-
-    for (i = 0; i < 16u; i++) {
-        if (crc & 0x8000u) {
-            crc = (uint16_t)((crc << 1) ^ 0x1021u);
-        } else {
-            crc = (uint16_t)(crc << 1);
-        }
-    }
-
-    return crc;
-}
-
-// BUS_FRAME: raise or lower wr, which frames a whole transaction.
-static void bus_frame(bool high) {
-    if (high) {
-        reg_write(SIO_GPIO_OUT_SET, BUS_WR_MASK);
-    } else {
-        reg_write(SIO_GPIO_OUT_CLR, BUS_WR_MASK);
-    }
-
-    bus_delay();
-}
-
-// BUS_SEND: put a word on the bus and pulse the clock. For the last word the
-// lines are released while clk is still high, so the FPGA can start answering
-// on the falling edge without both sides ever driving at once.
-static void bus_send(uint16_t word, bool last) {
-    reg_write(SIO_GPIO_OUT_CLR, BUS_DATA_MASK & ~(uint32_t)word);
-    reg_write(SIO_GPIO_OUT_SET, (uint32_t)word);
-    reg_write(SIO_GPIO_OE_SET, BUS_DATA_MASK);
-    bus_delay();
-
-    // clk: low -> high, the FPGA takes the word
-    reg_write(SIO_GPIO_OUT_SET, BUS_CLK_MASK);
-    bus_delay();
-
-    if (last) {
-        reg_write(SIO_GPIO_OE_CLR, BUS_DATA_MASK);
-    }
-
-    // clk: high -> low
-    reg_write(SIO_GPIO_OUT_CLR, BUS_CLK_MASK);
-    bus_delay();
-}
-
-// BUS_RECEIVE: pulse the clock and take the word the FPGA is driving.
-static uint16_t bus_receive(void) {
-    uint16_t word;
-
-    reg_write(SIO_GPIO_OUT_SET, BUS_CLK_MASK);
-    bus_delay();
-
-    word = (uint16_t)(reg_read(SIO_GPIO_IN) & BUS_DATA_MASK);
-
-    reg_write(SIO_GPIO_OUT_CLR, BUS_CLK_MASK);
-    bus_delay();
-
-    return word;
-}
-
-// BUS_WAIT_READY: keep pulsing until the FPGA answers READY.
-static bus_result_t bus_wait_ready(void) {
-    uint32_t i;
-    uint16_t status;
-
-    for (i = 0; i < BUS_STATUS_POLLS; i++) {
-        status = bus_receive();
-
-        if (status == BUS_STATUS_READY) {
-            return BUS_OK;
-        }
-        if (status == BUS_STATUS_ERROR) {
-            return BUS_ERR_REFUSED;
-        }
-        if (status != BUS_STATUS_BUSY) {
-            return BUS_ERR_NO_RESPONSE;
-        }
-    }
-
-    return BUS_ERR_TIMEOUT;
-}
-
-/* ========================================================================= */
 /*  Write                                                                    */
 /* ========================================================================= */
 
-bus_result_t bus_write(uint32_t address, uint32_t value) {
-    uint16_t word[5];
-    uint16_t crc = BUS_CRC_INIT;
-    bus_result_t result;
+void bus_write(uint32_t address, uint32_t value) {
+    uint16_t beat[BUS_BEATS];
     uint32_t i;
 
     // 1. Attach/setup bus pins if needed.
@@ -181,42 +88,50 @@ bus_result_t bus_write(uint32_t address, uint32_t value) {
         bus_attach();
     }
 
-    // 2. The request: command, address, value.
-    word[0] = BUS_CMD_WRITE;
-    word[1] = (uint16_t)(address);
-    word[2] = (uint16_t)(address >> 16);
-    word[3] = (uint16_t)(value);
-    word[4] = (uint16_t)(value >> 16);
+    // 2. Process inputs into 4 16'bit segments, 1 for each beat.
+    beat[0] = (uint16_t)(address);
+    beat[1] = (uint16_t)(address >> 16);
+    beat[2] = (uint16_t)(value);
+    beat[3] = (uint16_t)(value >> 16);
 
-    // 3. Open the frame, send the request, then its CHECK.
-    bus_frame(true);
+        // set wr = 1
+    reg_write(SIO_GPIO_OUT_SET, BUS_WR_MASK);
+    bus_delay();
 
-    for (i = 0; i < 5u; i++) {
-        bus_send(word[i], false);
-        crc = bus_crc16(crc, word[i]);
+        // set mask to high to reveal pin values
+    reg_write(SIO_GPIO_OE_SET, BUS_DATA_MASK);
+
+
+    // 3. For each beat: apply data to beat, raise clock pin, lower clock pin, repeat. 
+    for (i = 0; i < BUS_BEATS; i++) {
+
+        // clear the bus, then set next beat values
+        reg_write(SIO_GPIO_OUT_CLR, BUS_DATA_MASK & ~(uint32_t)beat[i]);
+        reg_write(SIO_GPIO_OUT_SET, (uint32_t)beat[i]);
+        bus_delay();
+
+        // clk: low -> high
+        reg_write(SIO_GPIO_OUT_SET, BUS_CLK_MASK);
+        bus_delay();
+
+        // clk: high -> low
+        reg_write(SIO_GPIO_OUT_CLR, BUS_CLK_MASK);
+        bus_delay();
     }
-    bus_send(crc, true);
 
-    // 4. Wait for the FPGA to confirm downstream took the value.
-    result = bus_wait_ready();
-
-    // 5. Close the frame. Whatever happened, the next frame starts clean.
-    bus_frame(false);
-
-    return result;
+    // 4. Send pin values low and wait for next function call/transfer.
+    // Note: the FPGA only reads wr on edges, which is why we don't touch the clock here.
+    reg_write(SIO_GPIO_OE_CLR, BUS_DATA_MASK);
+    reg_write(SIO_GPIO_OUT_CLR, BUS_WR_MASK);
+    bus_delay();
 }
 
 /* ========================================================================= */
 /*  Read                                                                     */
 /* ========================================================================= */
 
-bus_result_t bus_read(uint32_t address, uint32_t *value) {
-    uint16_t word[3];
-    uint16_t crc = BUS_CRC_INIT;
-    uint16_t low;
-    uint16_t high;
-    uint16_t check;
-    bus_result_t result;
+uint32_t bus_read(uint32_t address) {
+    uint16_t beat[BUS_BEATS];
     uint32_t i;
 
     // 1. Attach/setup bus pins if needed.
@@ -224,37 +139,54 @@ bus_result_t bus_read(uint32_t address, uint32_t *value) {
         bus_attach();
     }
 
-    // 2. The request: command, address.
-    word[0] = BUS_CMD_READ;
-    word[1] = (uint16_t)(address);
-    word[2] = (uint16_t)(address >> 16);
+    // 2. Process inputs into 2 16'bit segments, then set beats 2 and 3 to 0 as
+    // default values. These will be returned.
+    beat[0] = (uint16_t)(address);
+    beat[1] = (uint16_t)(address >> 16);
+    beat[2] = 0;
+    beat[3] = 0;
 
-    // 3. Open the frame, send the request, then its CHECK.
-    bus_frame(true);
+        // set wr = 0, for read operation
+    reg_write(SIO_GPIO_OUT_CLR, BUS_WR_MASK);
+    bus_delay();
 
-    for (i = 0; i < 3u; i++) {
-        bus_send(word[i], false);
-        crc = bus_crc16(crc, word[i]);
-    }
-    bus_send(crc, true);
+        // start with control of bus, as we send first 32'bits.
+    reg_write(SIO_GPIO_OE_SET, BUS_DATA_MASK);
 
-    // 4. Wait for READY, then take the value and its CHECK.
-    result = bus_wait_ready();
 
-    if (result == BUS_OK) {
-        low   = bus_receive();
-        high  = bus_receive();
-        check = bus_receive();
+    // 3. For first two beats, send address like write operation.
+    // Then for second two beats recieve from the FPGA.
+    for (i = 0; i < BUS_BEATS; i++) {
 
-        if (check != bus_crc16(bus_crc16(BUS_CRC_INIT, low), high)) {
-            result = BUS_ERR_CHECK;
-        } else {
-            *value = ((uint32_t)high << 16) | (uint32_t)low;
+        if (i < 2u) {
+            // clear the bus of prior data, then set the beat value
+            reg_write(SIO_GPIO_OUT_CLR, BUS_DATA_MASK & ~(uint32_t)beat[i]);
+            reg_write(SIO_GPIO_OUT_SET, (uint32_t)beat[i]);
+            bus_delay();
+
+        } else if (i == 2u) {
+            // stop driving the bus pins
+            reg_write(SIO_GPIO_OE_CLR, BUS_DATA_MASK);
+            bus_delay();
         }
+
+        // clk: low -> high.
+        reg_write(SIO_GPIO_OUT_SET, BUS_CLK_MASK);
+        bus_delay();
+
+        if (i >= 2u) {
+            // store the current value on the bus
+            beat[i] = (uint16_t)(reg_read(SIO_GPIO_IN) & BUS_DATA_MASK);
+        }
+
+        // clk: high -> low.
+        reg_write(SIO_GPIO_OUT_CLR, BUS_CLK_MASK);
+        bus_delay();
     }
 
-    // 5. Close the frame. Whatever happened, the next frame starts clean.
-    bus_frame(false);
+    // 4. Send data lines low
+    reg_write(SIO_GPIO_OE_CLR, BUS_DATA_MASK);
 
-    return result;
+    // 5. Return 32'bit value recieved from FPGA
+    return ((uint32_t)beat[3] << 16) | (uint32_t)beat[2];
 }

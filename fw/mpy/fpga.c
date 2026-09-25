@@ -25,22 +25,6 @@ static uint32_t arg_to_u32(mp_obj_t obj) {
     return (uint32_t)mp_obj_get_int_truncated(obj);
 }
 
-// RAISE_ON_ERROR: turn a failed bus result into fpga.FPGAError.
-static void raise_on_error(bus_result_t result) {
-    if (result == BUS_ERR_TIMEOUT) {
-        mp_raise_msg((mp_obj_type_t *)&fpga_error_type, "FPGA did not answer in time");
-    }
-    if (result == BUS_ERR_REFUSED) {
-        mp_raise_msg((mp_obj_type_t *)&fpga_error_type, "FPGA refused: an earlier request is still pending");
-    }
-    if (result == BUS_ERR_CHECK) {
-        mp_raise_msg((mp_obj_type_t *)&fpga_error_type, "value read back failed its check");
-    }
-    if (result != BUS_OK) {
-        mp_raise_msg((mp_obj_type_t *)&fpga_error_type, "no answer from the FPGA - is it programmed with a matching bitstream?");
-    }
-}
-
 /* ========================================================================= */
 /*  PYTHON FUNCTIONS                                                         */
 /* ========================================================================= */
@@ -50,7 +34,7 @@ static mp_obj_t fpga_write(mp_obj_t address_in, mp_obj_t value_in) {
     uint32_t address = arg_to_u32(address_in);
     uint32_t value = arg_to_u32(value_in);
 
-    raise_on_error(bus_write(address, value));
+    bus_write(address, value);
 
     return mp_const_none;
 }
@@ -59,11 +43,8 @@ static MP_DEFINE_CONST_FUN_OBJ_2(fpga_write_obj, fpga_write);
 // READ: fpga.read(address) -> int
 static mp_obj_t fpga_read(mp_obj_t address_in) {
     uint32_t address = arg_to_u32(address_in);
-    uint32_t value = 0;
 
-    raise_on_error(bus_read(address, &value));
-
-    return mp_obj_new_int_from_uint(value);
+    return mp_obj_new_int_from_uint(bus_read(address));
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(fpga_read_obj, fpga_read);
 

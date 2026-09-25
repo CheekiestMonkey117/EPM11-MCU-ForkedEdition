@@ -23,32 +23,8 @@
 // Every pin this module touches, and nothing else is ever touched.
 #define BUS_ALL_MASK        (BUS_DATA_MASK | BUS_CLK_MASK | BUS_WR_MASK)
 
-/* ========================================================================= */
-/*  The protocol, matching cpu_bus.sv                                        */
-/* ========================================================================= */
-
-// wr is high for a whole transaction and low between them. We drive one word
-// per clock pulse, then release the lines and the FPGA answers one per pulse:
-//
-//   write:  CMD_WRITE addr_lo addr_hi data_lo data_hi CHECK | BUSY... READY
-//   read:   CMD_READ  addr_lo addr_hi CHECK | BUSY... READY data_lo data_hi CHECK
-//
-// CHECK is the CRC-16/CCITT of the words before it, in that direction. The
-// FPGA ignores any frame whose command or CHECK is wrong, so a frame with too
-// many or too few beats is never acted on and simply gets no answer.
-
-#define BUS_CMD_WRITE       (0xA501u)
-#define BUS_CMD_READ        (0xA500u)
-
-#define BUS_STATUS_BUSY     (0x5A00u)
-#define BUS_STATUS_READY    (0x5A01u)
-#define BUS_STATUS_ERROR    (0x5AEEu)
-
-#define BUS_CRC_INIT        (0xFFFFu)
-
-// Pulses to wait for READY before giving up. One pulse is two delays, so the
-// default is roughly 11 ms at the default delay.
-#define BUS_STATUS_POLLS    (10000u)
+// Four beats per transfer: addr low, addr high, value low, value high.
+#define BUS_BEATS           (4u)
 
 /* ========================================================================= */
 /*  How long to hold each level                                              */
@@ -127,18 +103,6 @@
 #endif
 
 /* ========================================================================= */
-/*  Results                                                                  */
-/* ========================================================================= */
-
-typedef enum {
-    BUS_OK = 0,
-    BUS_ERR_NO_RESPONSE,    // no answer: FPGA not programmed, older bitstream, or a garbled frame
-    BUS_ERR_REFUSED,        // the FPGA is still waiting on an earlier request
-    BUS_ERR_TIMEOUT,        // the FPGA stayed BUSY for BUS_STATUS_POLLS pulses
-    BUS_ERR_CHECK,          // the value read back failed its CHECK
-} bus_result_t;
-
-/* ========================================================================= */
 /*  Functions                                                                */
 /* ========================================================================= */
 
@@ -160,13 +124,13 @@ bool bus_set_delay(uint32_t loops);
 // BUS_GET_DELAY: the hold time in use, or the default if none was set.
 uint32_t bus_get_delay(void);
 
-// WRITE: send a 32-bit value to a 32-bit address, and wait for the FPGA to
-// confirm downstream has taken it.
-bus_result_t bus_write(uint32_t address, uint32_t value);
+// WRITE: send a 32-bit value to a 32-bit address. Four beats, all ours.
+void bus_write(uint32_t address, uint32_t value);
 
-// READ: fetch the 32-bit value at a 32-bit address into *value. *value is
-// only written when the result is BUS_OK.
-bus_result_t bus_read(uint32_t address, uint32_t *value);
+// READ: fetch the 32-bit value at a 32-bit address. Two beats out, two back.
+// NOTE: an address the FPGA does not decode returns 0xDEADBEEF, which is its
+// own miss marker, not an error from this code.
+uint32_t bus_read(uint32_t address);
 
 
 #endif /* EPM11_BUS_H */
