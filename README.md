@@ -12,6 +12,7 @@ Example project for the MCU component of the [EPM11](https://brisbanesilicon.com
 *   [Board Setup](#board-setup)
 *   [Build](#build)
 *   [Upload](#upload)
+*   [Pulse Delay](#pulse-delay)
 *   [Examples](#examples)
 *   [Pinout File](#pinout-file)
 *   [Authors](#authors)
@@ -56,6 +57,8 @@ input               cpu_valid,
 output  reg         cpu_ready,
 ```
 
+By default, user.sv passes each request on to the FPGA memory (internal SRAM for the first 32 KB, HyperRAM above that), so a later `fpga.read(0x4)` returns `0xFF`.
+
 <br>
 
 ## Getting Started
@@ -79,10 +82,16 @@ If you wish to build the custom Micropython layer:
 1. A copy of Micropython (located in the same root directory as this repository)
   - Launch a terminal program.
   - Navigate to the same directory in which you host the EPM11 repository.
-  - `git clone https://github.com/BrisbaneSilicon/EPM11-MCU.git`
+  - `git clone -b v1.28.0 https://github.com/micropython/micropython.git`
 2. An installation of version 13.3.rel1 of the Arm cross compiler toolchain. See [here](https://github.com/RT-Thread/toolchains-ci/releases).
 3. An installation of Python3.
 4. An installation of the Python library pyelftools (`pip install 'pyelftools>=0.25'`)
+
+On Windows, [MSYS2](https://www.msys2.org/) provides items 2 to 4, along with `make`:
+
+1. Install MSYS2 to its default location, `C:\msys64`.
+2. Open 'MSYS2 CLANG64' from the Start menu, and install the tools:
+  - `pacman -S --needed make mingw-w64-clang-x86_64-arm-none-eabi-gcc mingw-w64-clang-x86_64-python mingw-w64-clang-x86_64-python-pyelftools`
 
 <br>
 
@@ -115,7 +124,13 @@ Substituting `<arm gnu toolchain installation directory>` for the actual install
 
 ### Windows
 
-Coming soon!
+In the 'MSYS2 CLANG64' terminal:
+
+```bash
+cd <this repository directory>/fw/mpy
+make
+```
+Substituting `<this repository directory>` for the actual directory, written with forward slashes, i.e. `C:\Users\me\EPM11-MCU` becomes `/c/Users/me/EPM11-MCU`. The module is built as `fpga.mpy` in the same directory.
 
 <br>
 
@@ -138,11 +153,33 @@ mpremote fs cp fpga.mpy :fpga.mpy
 
 <br>
 
+## Pulse Delay
+
+The MCU drives the bus clock, so after each pin change it waits a set number of loops (roughly 47 ns each) for the FPGA to catch up. The number of loops needed depends on the FPGA system clock, chosen with the `-k` build switch of the [EPM11-FPGA](https://github.com/BrisbaneSilicon/EPM11-FPGA) sister project. Set it once, before the first read or write, for example for an FPGA built with `-k 66`:
+
+```python
+import fpga
+
+fpga.set_pulse_delay(9)
+```
+
+| FPGA Clock (`-k`) | Pulse Delay |
+| :------: | :------: |
+| 51 MHz (default) | 13 |
+| 66 MHz | 9 |
+| 75 MHz | 8 |
+| 81 MHz | 8 |
+| 87 MHz | Only SRAM (below `0x8000`) works, HyperRAM fails at any pulse delay |
+
+These are the lowest values that passed 40,000 HyperRAM (`0x8000` and up) write and read backs without an error. A higher value is always safe, just slower. `fpga.get_pulse_delay()` returns the current value, which is 12 if it has not been set.
+
+<br>
+
 ## Examples
 
 ### Bus Test Simple
 
-The [simple bus test](https://github.com/BrisbaneSilicon/EPM11-MCU/blob/master/script/examples/cpu_bus_test.py) script demonstrates bi-directional communication between the RP2350 MCU and FPGA. Simply upload it (in the same manner you uploaded the fpga.mpy module), and flash the FPGA with firmware that has been built with the ['-t' switch](https://github.com/BrisbaneSilicon/EPM11-FPGA/blob/master/README.md#build), and then run the example. It performs various register read/writes to verify the FPGA bus functionality. The output should be similar to the following:
+The [simple bus test](https://github.com/BrisbaneSilicon/EPM11-MCU/blob/master/script/examples/cpu_bus_test.py) script demonstrates bi-directional communication between the RP2350 MCU and FPGA. Simply upload it (in the same manner you uploaded the fpga.mpy module), and flash the FPGA with firmware built from the [EPM11-FPGA](https://github.com/BrisbaneSilicon/EPM11-FPGA) sister project (no build switches are needed), and then run the example. It writes values to the FPGA memory and reads them back to verify the FPGA bus functionality. The output should be similar to the following:
 
 ```
 	------- Begin: EPM11 FPGA Bus Test -------
